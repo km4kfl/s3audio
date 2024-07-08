@@ -14,6 +14,8 @@ import boto3
 import io
 import pickle
 import uuid
+import os.path
+import datetime as dt
 
 def audio_reader(q, sample_rate):
     print('opening pyaudio')
@@ -32,16 +34,16 @@ def audio_reader(q, sample_rate):
         q.put((chunk, st))
 
 def send_package(s3c, pkg, bucket_name, storage_class='STANDARD'):
-    fd = io.BytesIO(pickle.dumps(pkg))
     uid = uuid.uuid4().hex
     pkg_key = '%s-%s-%s' % (
         int(time.time()),
         uid,
         pkg['id']
     )
-    print('uploading')
+    print('uploading', dt.datetime.now())
     while True:
         try:
+            fd = io.BytesIO(pickle.dumps(pkg))
             s3c.upload_fileobj(
                 fd,
                 bucket_name,
@@ -53,18 +55,19 @@ def send_package(s3c, pkg, bucket_name, storage_class='STANDARD'):
             break
         except Exception as e:
             print(e)
-    print('uploaded')
+    print('uploaded', dt.datetime.now())
 
 def get_boto3_s3_client(s3_cred_file, region='us-east-2'):
     """Get a Boto3 S3 client using the local credential
     file s3sak.txt and return it.
     """
+    if not os.path.exists(s3_cred_file):
+        raise ValueError('The credential file `%s` did not exist. Expected access key and secret access key on two lines in text format.' % s3_cred_file)
+
     with open(s3_cred_file, 'r') as fd:
         lines = list(fd.readlines())
         access_key = lines[0].strip()
         secret_access_key = lines[1].strip()
-
-    # devtestuser:devtest
 
     c = boto3.client(
         service_name='s3',
@@ -129,7 +132,7 @@ if __name__ == '__main__':
     ap.add_argument('--s3-cred', type=str, default='s3sak.txt')
     ap.add_argument('--s3-region', type=str, default='us-east-2')
     ap.add_argument('--s3-bucket', type=str, default='audio248')
-    ap.add_argument('--s3-storage-class', type=str, choices=['STANDARD-IA'], default='STANDARD-IA')
+    ap.add_argument('--s3-storage-class', type=str, choices=['GLACIER', 'STANDARD', 'STANDARD-IA'], default='GLACIER')
     ap.add_argument('--rate', type=int, default=48000)
     ap.add_argument('--description', type=str, required=True)
     ap.add_argument('--id', type=str, required=True)
