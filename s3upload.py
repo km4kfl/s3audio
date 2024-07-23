@@ -16,30 +16,43 @@ import pickle
 import uuid
 import os.path
 import datetime as dt
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
 
-def audio_reader(q, sample_rate):
-    print('opening pyaudio')
+def audio_reader(q, sample_rate, sample_size, input_device_index):
+    print('opening pyaudio', sample_size)
     p = pyaudio.PyAudio()
     s = p.open(
-        format=p.get_format_from_width(2),
+        format=p.get_format_from_width(sample_size),
         channels=1,
         rate=sample_rate,
-        input=True
+        input=True,
+        input_device_index=input_device_index
     )
     print(s)
     print('recording audio')
     while True:
         st = time.time()
-        chunk = s.read(2 * sample_rate * 4)
+        chunk = s.read(sample_size * sample_rate * 4)
         q.put((chunk, st))
 
-def send_package(s3c, pkg, bucket_name, storage_class='STANDARD'):
+def send_package(s3c, pkg, bucket_name, storage_class='STANDARD', aes_key=None):
     uid = uuid.uuid4().hex
     pkg_key = '%s-%s-%s' % (
         int(time.time()),
         uid,
         pkg['id']
     )
+
+    if aes_key is not None:
+        actual_key = aes_key[:32]
+        cipher = AES.new(actual_key, AES.MODE_CTR)
+        pkg['encrypted'] = 'aes-256-ctr'
+        pkg['nonce'] = cipher.nonce
+        pkg['audio_pcm'] = cipher.encrypt(pkg['audio_pcm'])
+        print('encrypted')
+
+
     print('uploading', dt.datetime.now())
     while True:
         try:
@@ -79,12 +92,18 @@ def get_boto3_s3_client(s3_cred_file, region='us-east-2'):
     return c
 
 def main(args):
+    if args.aes_key_path is not None:
+        with open(args.aes_key_path, 'rb') as fd:
+            aes_key = fd.read()
+    else:
+        aes_key = None
+
     q = queue.Queue()
 
     # start thread to queue up audio data
     th = threading.Thread(
         target=audio_reader,
-        args=(q, args.rate),
+        args=(q, args.rate, args.sample_size, args.input_device_index),
         daemon=True
     )
     th.start()
@@ -107,7 +126,7 @@ def main(args):
             chunk = b''.join(chunks)
             pkg = {
                 'id': args.id, #'hgws1',
-                'sample-width': 2,
+                'sample-width': args.sample_size,
                 'sample-rate': args.rate,
                 'description': args.description, #'A high-gain parabolic in window slot.',
                 'audio_pcm': chunk,
@@ -118,17 +137,26 @@ def main(args):
                 with wave.open('test.wav', 'wb') as w:
                     w.setnchannels(1)
                     w.setframerate(args.rate)
-                    w.setsampwidth(2)
+                    w.setsampwidth(args.sample_size)
                     w.writeframes(chunk)
                 exit()
-            send_package(s3c, pkg, args.s3_bucket, args.s3_storage_class)
+            send_package(s3c, pkg, args.s3_bucket, args.s3_storage_class, aes_key)
             chunks = []
             chunk_st = None
             chunks_sz = 0
 
 if __name__ == '__main__':
+    p = pyaudio.PyAudio()
+    dcnt = p.get_device_count()
+    for i in range(dcnt):
+        print(p.get_device_info_by_index(i))
+    #exit()
+
     ap = argparse.ArgumentParser()
+    ap.add_argument('--input-device-index', type=int, required=True)
     ap.add_argument('--write-test-wave', action=argparse.BooleanOptionalAction)
+    ap.add_argument('--aes-key-path', type=str, default=None)
+    ap.add_argument('--sample-size', type=int, default=2)
     ap.add_argument('--s3-cred', type=str, default='s3sak.txt')
     ap.add_argument('--s3-region', type=str, default='us-east-2')
     ap.add_argument('--s3-bucket', type=str, default='audio248')
